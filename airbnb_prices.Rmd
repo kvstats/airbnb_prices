@@ -1,0 +1,967 @@
+---
+title: "Bayesian Hierarchical Modeling of Toronto Airbnb Prices"
+author: "Kristine Villaluna"
+date: "April 2022"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+urlcolor: blue
+abstract: The City of Toronto is the most populous city in Canada and is recognized as an international centre of business, finance, arts, and culture. With the large amount of visitors Toronto sees everyday, an increasing number of people have been turning to alternative forms of accommodations when they stop by. This analysis aims to examine the different factors that affect the prices of Airbnbs in Toronto such as the size of the listing, information about the hosts, review scores, and the neighbourhoods or districts they are located in. Using a hierarchical fixed effect model, we model the log price using a room type structure using a combination of these covariates and find that the most important factors that affect listing prices are the number of people it accommodates, the number of bedrooms and bathrooms, and the location of the listing. Across all models tried, it was found that entire homes/apartments had a higher starting price than any of the other room types, with hotel rooms having the lowest intercept.
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r}
+# load libraries
+library(here)
+library(dplyr)
+library(skimr)
+library(stringr)
+library(knitr)
+library(tidyverse)
+library(janitor)
+library(ggmap)
+library(rgeos)
+library(maptools)
+library(RColorBrewer)
+library(rstan)
+library(caret)
+library(loo)
+library(gridExtra)
+library(opendatatoronto)
+library(bayesplot) 
+library(loo) 
+library(tidybayes)
+
+# clear memory 
+invisible(gc())
+invisible(memory.limit(9999999999))
+```
+
+# Introduction
+
+The City of Toronto is the capital city of Ontario and has the highest population of any city in Canada, with a recorded population of 2,794,356 individuals according to the 2021 Census of Population (Statistics Canada, 2022). It is recognized as one of the most multicultural cities in the world and has a vibrant tourism economy. The nature of the city attracts individuals from all over the world to come visit for reasons such as business, finance, arts and culture. Sports fans can head over to the Rogers Center to catch a Blue Jays baseball game, or perhaps cheer on the Maple Leafs (hockey) or the Raptors (basketball) at the Scotiabank Arena. Whatever one's interests are, there is something for everyone in the city. 
+
+With the rising prices of hotel rooms, an increased number of people have been turning to other forms of accommodations while on vacation. This combined with other factors such as privacy and in suite kitchens/laundry, Airbnbs have been a great alternative to traditional hotels for lots of travelers. Airbnb’s business model focuses on a marketplace platform where hosts and guests exchange housing for money (Airbnb, 2022). When listing their home on Airbnb, hosts have the ability to set additional prices for individual nights, weekly stays, cleaning fees, weekend prices, and additional guests.
+
+The objective of this analysis is to examine the different factors that effect the prices of Airbnbs in Toronto. We will be examining a variety of factors, ranging from information on the listing itself, such as the neighborhood the listing is in, the type of room, the number of bathrooms, etc., to information about the host and the reviews a listing has. This is important as we would like to better understand the role that these factors play in the pricing of these specific listings. 
+
+\newpage
+
+# Data 
+
+Although Airbnb does not have an official API available to the public, data is available from [InsideAirbnb](http://insideairbnb.com/get-the-data.html).^[The data dictionary is available [here](https://docs.google.com/spreadsheets/d/1iWCNJcSutYqpULSQHlNyGInUvHg2BoUGoNRIGa6Szc4/edit#gid=982310896).] Inside Airbnb is a mission-driven project with the objective to provide data that quantifies the impact of short-term rentals on the residential market. There are a number of variables available in the data set, and for the purpose of this analysis, we have restricted the data frame to certain variables we would be interested in examining further. We have chosen to remove text variables such as name and description, as well as latitude and longitude coordinates. These data are from their most recent release, compiled on December 05, 2021 and contain 15,261 observations. This data is representative of the population, as it is all of the Airbnb listings in Toronto. Thus, we will proceed to use a random sample of the population in our analysis. 
+
+We have a diverse set of variables available to us to use in the analysis. The data contains information on the host, such as how long they have been a host for, their average response time, whether they are a superhost or not, and how many listings they have in total. We have information on the listing such as the neighbourhood it is located in, the type of room it is, and how big it is (number of bathrooms/bathrooms, and how many people it can accommodate). Finally, we have information on whether it has availability and its review scores, both overall and for different subcategories. 
+
+During the data preprocessing, it was found that there was a total of 15,261 observations, but only 15,121 distinct observations (140 duplicate rows). It may be plausible that a host has multiple listings at a given location, however, it is less likely that all the other variables are the same. Thus, these duplicates were removed from the data.
+
+Looking at missing values, the bathrooms variable was completely empty. To overcome this, we extracted the required information from the `bathrooms_text` column. The review score variables had a complete rate of approx. 77%, the bedrooms variable was 93% complete, and then bathrooms and host variables were both approximately 99% complete. Looking closer at the review variables it was found that many of the reviews had a rating of 0, or only had one incomplete review. Regarding the bedrooms and bathrooms, it was not clear if imputation would be possible as there were many different room type and accommodates combinations. Looking at the host related variables, there was such a small number that removing these observations would not drastically alter the composition of the data.
+
+Examining these missing values provided us with lots of information in order to examine where we may want to consider removing variables or observations due to lack of information. Given the size of our dataset, and the fact that these are variables that we expect may be influential on the price of an Airbnb, we proceeded to remove these missing values due to a lack of information. After removing missing values and duplicates, we are left with 10,731 observations.
+
+The main dependent variable of interest to us is the price of the listing. We will apply a log-transformation to obtain our dependent variable of interest, `log(price)` as price is heavily right-skewed as seen below in the top left panel. 
+
+```{r}
+# read in data
+airbnb_raw <- read.csv(here("Project/listings.csv"),na.strings=c(""," ","NA"))
+
+bnb <- read.csv(here("Project/airbnb.csv"))
+
+# restrict dataframe to certain variables
+airbnb_subset <- airbnb_raw %>% dplyr::select(
+  host_id,
+  host_since,
+  host_response_time,
+  host_is_superhost,
+  host_listings_count,
+  host_total_listings_count,
+  neighbourhood_cleansed,
+  room_type,
+  bathrooms,
+  bathrooms_text,
+  accommodates,
+  bedrooms,
+  price,
+  number_of_reviews,
+  has_availability,
+  review_scores_rating,
+  review_scores_accuracy,
+  review_scores_cleanliness,
+  review_scores_checkin,
+  review_scores_communication,
+  review_scores_location,
+  review_scores_value
+)
+```
+
+```{r, results="hide"}
+# first check all variables are the correct type
+# summary(airbnb_subset)
+
+# convert price from string to numerical 
+airbnb_types <- airbnb_subset %>% 
+  mutate(price = str_remove(price, ","),
+         price = str_remove(price, "\\$"),
+         price = as.numeric(price))
+ 
+# convert superhost to numeric
+airbnb_types <- airbnb_types %>% mutate(host_is_superhost = recode(host_is_superhost, "f" = 0, "t" = 1),
+                                        has_availability = recode(has_availability, "f" = 0, "t" = 1))
+```
+
+```{r, results="hide"}
+# look at duplicates
+
+# total number of obs
+airbnb_types %>% count()
+
+# total number of distinct obs
+airbnb_types %>% distinct() %>% count()
+
+# remove duplicates
+airbnb_nodups <- airbnb_types %>% distinct()
+```
+
+```{r, results="hide"}
+# check that these are the same column
+all(airbnb_nodups$host_listings_count == airbnb_nodups$host_total_listings_count)
+
+# remove one of the columns
+airbnb_nodups <- airbnb_nodups %>% select(-host_total_listings_count)
+```
+
+```{r, include=FALSE}
+# look at missing values
+skim(airbnb_nodups) 
+```
+
+```{r}
+# Looking at the summary output, we note that the bathrooms column is completely empty. This variable we can remove, and we can extract the required information from the `bathrooms_text` column.
+
+# remove bathroom and recode bathroom text 
+airbnb_no_missing <- airbnb_nodups %>% 
+  dplyr::select(-bathrooms) %>% 
+  mutate(bathrooms = as.numeric(str_extract(airbnb_nodups$bathrooms_text, "\\d+\\.*\\d*"))) %>% 
+  dplyr:: select(-bathrooms_text)
+```
+
+```{r, results="hide"}
+# Next, we see that the variables with the second most missing values are the group of review score variables. We see that there are 3354 observations that have an overall rating (`review_scores_rating`), but there are approximately 168 that have an overall rating but are missing some subcategories of the ratings. 
+
+# look at obs where there is an overall rating but missing subcategories
+airbnb_no_missing %>%
+  dplyr::select(contains("review")) %>%
+  filter(!is.na(review_scores_rating)) %>%
+  filter_at(vars(-review_scores_rating, -number_of_reviews), any_vars(is.na(.))) %>%
+  arrange(number_of_reviews)
+```
+
+```{r}
+# After manually checking these 168 observations, it looks like many of these reviews have a rating of 0, or have only one review and it is incomplete. Given the size of our dataset, and the fact that most of these listings only have one review, I feel comfortable removing these observations from the dataset. 
+
+# remove NA review scores
+airbnb_no_missing <- airbnb_no_missing %>% 
+filter(across(starts_with("review"), ~ !is.na(.)))
+```
+
+```{r}
+# Next, we can take a look at the units that were missing bedrooms and bathrooms. After removing the listing that had missing values for the review scores, the number of listings that were missing bedroom information went from 1120 down to 847.
+
+# look at listings with missing bedroom and bathroom
+check_bedrooms <- airbnb_no_missing[is.na(airbnb_no_missing$bedrooms),]
+check_bathrooms <- airbnb_no_missing[is.na(airbnb_no_missing$bathrooms),]
+```
+
+```{r}
+# After looking at these 847 units, it is not clear if we will be able to impute the missing values, because there are many different room type and accommodates. On the same note, there are only 16 listings missing bathroom (three of them missing bedroom information as well). Because these are variables that we expect may be influential on the price of an Airbnb, we can remove these values due to a lack of information. 
+
+# remove NA bedroom and bathroom
+airbnb_no_missing <- airbnb_no_missing %>% filter(across(c(bedrooms, bathrooms), ~ !is.na(.)))
+```
+
+```{r, results="hide"}
+# Finally, we can take a look at the host related variables. These variables are not missing too many values, only 8 total after removing missing values from the other variables. Because of this small number, we can remove these observations without altering the data too much. Before we do that, we should check to make sure they all occur in the same observations. 
+
+check_host <- airbnb_no_missing[is.na(airbnb_no_missing$host_is_superhost),]
+
+# check that they are all missing together
+airbnb_no_missing %>% 
+  select(starts_with("host")) %>%
+  select(-host_id) %>%
+  filter_all(is.na) %>% 
+  count()
+
+# remove NAs host
+airbnb_final <- airbnb_no_missing %>% filter_at(vars(starts_with("host")), all_vars(!is.na(.)))
+```
+
+```{r, include=FALSE}
+# add log price
+airbnb_final <- airbnb_final %>% mutate(log_price = log(price))
+
+# add districts to data
+districts <- read.csv(here("Project/toronto_districts.csv"))
+colnames(districts) <- c("hood_id", "neighbourhood_cleansed", "district")
+# districts <- districts %>% select(-hood_id)
+
+# check spelling of neighbourhoods
+distinct_hood <- airbnb_final %>% distinct(neighbourhood_cleansed) 
+sorted_distinct_hood <- with(distinct_hood,  distinct_hood[order(neighbourhood_cleansed) , ])
+
+sorted_hood_id <- with(districts,  districts[order(neighbourhood_cleansed) , ])
+check_neighbourhoods <- as.data.frame(cbind(sorted_distinct_hood, sorted_hood_id), stringsAsFactors = FALSE)
+
+check_neighbourhoods[which(check_neighbourhoods$sorted_distinct_hood != check_neighbourhoods$neighbourhood), ]
+
+# merge to airbnb data
+airbnb_final <- left_join(airbnb_final, districts, by=c("neighbourhood_cleansed" = "neighbourhood_cleansed"))
+```
+
+```{r}
+# PRICE
+
+price_dat <- airbnb_final %>%
+  select(price, log_price) %>%
+  pivot_longer(cols=price:log_price, names_to = "Type", values_to = "Price")
+
+price_plot <-	ggplot(price_dat, aes(x = Price, fill=Type, facet = Type, ..density..)) +
+	geom_histogram(bins = 100, fill = "black", alpha = 0.3) +
+	geom_density(fill="lightblue", alpha = 0.8) +
+	facet_wrap(~Type, scales = "free") +
+  theme_bw() +
+	labs(title = "Price and Log Price Density Plots") +
+  theme(axis.title.x=element_blank())
+
+price_plot
+```
+\newpage
+
+Given that we are interested in modeling the log price, we can take a look at the average log price per neighborhood displayed in the map below. Neighborhood geography data is sourced from Open Data Toronto (2022). We see that price varies quite a bit depending on the neighbourhood the listing is located in. The top two most expensive neighbourhoods are the Waterfront Communities-The Island and Bridle Path-Sunnybrook-York Mills, with the least expensive being Black Creek. 
+
+
+```{r, results="hide",include=FALSE}
+
+# neighbourhoods <- read.csv(here("Project/neighbourhood-profiles-2016.csv"))
+# 
+# # keep first two rows 
+# hood_ids <- as.data.frame(t(neighbourhoods[1:2, ])) 
+# rownames(hood_ids)<-NULL
+# colnames(hood_ids) <- c("neighbourhood", "hood_id")
+# 
+# # remove unwanted rows 
+# hood_ids_clean <- subset(hood_ids, neighbourhood!="Data Source" & neighbourhood!="Category" & neighbourhood!="Characteristic" & neighbourhood!="Topic" & neighbourhood!="_id" & neighbourhood!="City of Toronto")
+# 
+# # check spelling of neighbourhoods
+# distinct_hood <- airbnb_final %>% distinct(neighbourhood_cleansed) 
+# sorted_distinct_hood <- with(distinct_hood,  distinct_hood[order(neighbourhood_cleansed) , ])
+# 
+# sorted_hood_id <- with(hood_ids_clean,  hood_ids_clean[order(neighbourhood) , ])
+# check_neighbourhoods <- as.data.frame(cbind(sorted_distinct_hood, sorted_hood_id), stringsAsFactors = FALSE)
+# 
+# check_neighbourhoods[which(check_neighbourhoods$sorted_distinct_hood != check_neighbourhoods$neighbourhood), ]
+# 
+# # 3 misspellings
+# hood_ids_clean$neighbourhood = gsub("St. ", "St.", hood_ids_clean$neighbourhood)
+# hood_ids_clean[hood_ids_clean=="Weston-Pelham Park"] = "Weston-Pellam Park"
+# 
+# 
+# # merge to airbnb data
+# airbnb_map <- left_join(airbnb_final, hood_ids_clean, by=c("neighbourhood_cleansed" = "neighbourhood"))
+
+```
+
+```{r, results="hide"}
+airbnb_map <- airbnb_final
+
+# get geography data from opendatatoronto
+
+# get package
+package <- show_package("4def3f65-2a65-4a4f-83c4-b2a4aed72d46")
+package
+
+# get all resources for this package
+resources <- list_package_resources("4def3f65-2a65-4a4f-83c4-b2a4aed72d46")
+
+# identify datastore resources; by default, Toronto Open Data sets datastore resource format to CSV for non-geospatial and GeoJSON for geospatial resources
+datastore_resources <- filter(resources, tolower(format) %in% c('csv', 'geojson'))
+
+# load the historical 140 datastore resource 
+data <- filter(datastore_resources, row_number()==6) %>% get_resource()
+data
+
+# keep only geometry
+geom <- data %>% dplyr::select(AREA_SHORT_CODE, geometry)
+
+# remove leading zeros
+geom <- geom %>% mutate(hood_id = str_remove(AREA_SHORT_CODE, "^0+")) %>% dplyr::select(-AREA_SHORT_CODE)
+```
+
+``` {r crop-hook,cache=FALSE}
+knit_hooks$set(crop=hook_pdfcrop)
+```
+
+```{r, crop=TRUE}
+# calculate mean log prices
+means <- airbnb_map %>% group_by(hood_id) %>% summarize(mean_log_price = mean(log_price))
+geom_plot <- merge(means, geom, by.y='hood_id', by.x='hood_id')
+TO_plot <- geom_plot %>% dplyr::select(mean_log_price, geometry)
+
+# plot
+map_plot <- ggplot(data = TO_plot, aes(fill = mean_log_price)) + 
+  geom_sf(aes(geometry=geometry)) + 
+  labs(title="Average Log Price per Night by Toronto Neighbourhood",
+       fill="Average Log Price ($)") +
+  scale_fill_gradientn(colours=rev(brewer.pal(6,"RdYlBu")))+
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+map_plot
+```
+
+
+```{r}
+# ROOM TYPE
+# boxplot
+type_boxplot <- ggplot(data = airbnb_final, aes(x = "", y = log_price, fill=room_type)) + 
+  geom_boxplot() + 
+  theme_bw() +
+  labs(title="Log Price vs. Room Type", y="Log Price ($)") +
+  theme(axis.title.x = element_blank(), legend.position = "none") 
+  #guides(fill=guide_legend(nrow=2,byrow=TRUE))
+
+# room type density plot
+type_density <- airbnb_final %>% ggplot(aes(x=log_price, colour=room_type)) +
+  geom_density() +
+  theme_bw() +
+  labs(title="Log Price Densities by Room Type") +
+  theme(legend.position = "none" )
+```
+
+
+```{r}
+# BED/BATH/ACCOMODATES
+bed_bath_dat <- airbnb_final %>% select(log_price, bathrooms, accommodates, bedrooms) %>%
+  pivot_longer(-log_price, names_to="Category", values_to="Quantity")
+
+bed_bath_plot <- ggplot(bed_bath_dat,aes(x=Quantity, y=log_price, colour=Category)) +
+  geom_point() +
+  facet_wrap(~Category, scales="free") +
+  geom_smooth(formula = y ~ x, method = "lm", color="black") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  scale_color_brewer(palette="Accent") +
+  labs(title="Listing Characteristics vs. Log Price", y="Log Price ($)")
+```
+
+\newpage
+
+After reviewing the remaining covariates, it was found that the log price varies considerably for each given room type as displayed in the top plot below. With this in mind, we will proceed to use this variable to structure our hierarchical model. In the bottom plot, we see that variables related to the size of the listing (accomodates, bathrooms, bedrooms) all have a positive relationship with log price. This is no surprise, as intuitively, the larger the Airbnb is, the more expensive it will be.  
+
+
+```{r}
+require(gridExtra)
+grid.arrange(type_density,bed_bath_plot, ncol=1, nrow=2)
+```
+
+Further investigation into the data found that the Waterfront Communities-The Island has the most listings in the data. Looking at the proportions of the different room type it was found that most listings are for entire homes/apartments, with the next most frequent being a private room. Shared rooms and hotels are much less common. 
+
+More plots relating to the host and review variables are available in the .Rmd file. Overall, in the EDA it was found that variables related to the listing, the neighborhood, and room type were most influential on the price. Variables relating to the host and review scores did not have as strong of a relationship. Of the review variables, the overall rating, accuracy, cleanliness, and location would be of interest. 
+
+```{r, include=FALSE}
+#################################
+# EXTRA EDA PLOTS
+#################################
+
+########### REVIEW SCORES ###############
+# get review data 
+review_dat <- airbnb_final %>% select(log_price, starts_with("review"), number_of_reviews) %>%
+  pivot_longer(-log_price, names_to="Category", values_to="Score") %>%
+  mutate(Category = gsub("review_scores_", "", Category))  
+  
+# plot review vs log price
+review_plot <- ggplot(review_dat, aes(x=Score, y=log_price, color=Category)) +
+  geom_point() +
+  geom_smooth(method = "lm", color="black", alpha=0.2) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~ Category, ncol=4, scales="free") +
+  labs(title="Review Score Categories vs. Log Price", y="Log Price ($)", subtitle="Linear fit in black")
+
+review_plot
+
+
+############## HOST PLOTS #################
+# HOST 
+# response time
+response_boxplot <- ggplot(data = airbnb_final, aes(x = "", y = log_price, fill=as.factor(host_response_time))) + 
+  geom_boxplot() + 
+  theme_bw() +
+  labs(title="Log Price vs. Response Time", y="Log Price ($)") +
+  theme(axis.title.x = element_blank(),legend.position = "none") 
+
+# get host data 
+host_dat <- airbnb_final %>% select(log_price, starts_with("host"))
+
+# plot host listing count vs log price
+listings_plot <- ggplot(host_dat, aes(x=host_listings_count, y=log_price)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme_bw() +
+  labs(title="Host Listings Count vs. Log Price", y="Log Price ($)")
+
+listings_plot
+
+# superhost
+super_boxplot <- ggplot(data = host_dat, aes(x = "", y = log_price, fill=as.factor(host_is_superhost))) + 
+  geom_boxplot() + 
+  theme_bw() +
+  labs(title="Log Price vs. Superhost", y="Log Price ($)") +
+  theme(axis.title.x = element_blank())
+super_boxplot
+```
+
+```{r, include=FALSE}
+#### EXTRA SUMMARY TABLES 
+# First, let us see the top 3 neighborhoods with the highest proportion of listings in the data. Recall that there are a total of 140 neighborhoods in Toronto:
+hood_props <- airbnb_final %>%  group_by(neighbourhood_cleansed) %>%
+  summarize(n=n()) %>% 
+  mutate(total = sum(n)) %>% 
+  mutate(proportion = n/total) %>% 
+  arrange(desc(proportion))
+
+kable(head(hood_props, 3))
+
+# look at proportions for room type 
+type_props <- airbnb_final %>%  group_by(room_type) %>%
+  summarize(n=n()) %>% 
+  mutate(total = sum(n)) %>% 
+  mutate(proportion = n/total) %>% 
+  arrange(desc(proportion))
+
+kable(type_props)
+
+# review summaries 
+reviews <- airbnb_final %>% select(starts_with("review"), number_of_reviews) 
+
+names <- colnames(reviews)
+sd <- apply(reviews,2,sd)
+means <- colMeans(reviews)
+
+# create new dataframe
+review_summary <- as.data.frame(cbind(names,means,sd))
+rownames(review_summary) <- NULL
+kable(review_summary, digits=2, col.names = c("Variable", "Mean", "SD"))
+
+# mean price by neighbourhood
+airbnb_final %>% group_by(neighbourhood_cleansed) %>% 
+  summarize(mean_price = mean(price),
+            mean_log_price = mean(log_price))
+```
+
+\newpage
+
+# Methods 
+For this analysis, we will hierarchically model log price with fixed effects, using a room type hierarchical structure (within neighborhoods). This allows us varying intercepts for the covariates, but a constant slope. This hierarchical structure has been motivated by the EDA where it was found that price varied vastly across different room types.
+
+Thus, the model specification is as follows:
+
+$$
+\begin{aligned}
+y_i|\alpha_{j[i]} &\sim N(\alpha_{j[i]} + \beta^T x_i,\sigma_y^2) \; \text{for} \; i=1,2,...,n \\
+\alpha_j &\sim N(\mu_\alpha,\sigma^2_\alpha), \; \text{for} \; j=1,\dots,J \\
+\mu_\alpha &\sim N(0,1) \\
+\sigma^2_\alpha &\sim N^+(0,1) \\
+\sigma^2_y &\sim N^+(0,1) \\
+\beta_k &\sim N(0,1)
+\end{aligned}
+$$
+
+Where 
+
+- $i$ is the observation number
+- $n$ is the total number of observations
+- $j$ is the room type number
+- $J$ is the total number of room types
+- $k$ is the number of covariates
+- $x_i$ is the vector of covariate data for observation $i$
+- $\alpha_j$ is the room_type level mean log price
+- $\beta$ is a vector of $k$ coefficients corresponding to each of the covariates
+
+As a baseline, a linear (non-hierarchical) model will also be fit in order to compare the models. The simpler model will be specified as follows:
+
+$$
+\begin{aligned}
+y_i &\sim N(\alpha + \beta^T x_i,\sigma_y^2) \; \text{for} \; i=1,2,...,n \\
+\alpha &\sim N(0,1),  \ \\
+\sigma^2_y &\sim N^+(0,1) \\
+\beta_k &\sim N(0,1)
+\end{aligned}
+$$
+
+To validate our model, we will check model diagnostic plots such as traceplots and pairs plots to ensure the chains have mixed properly and that we have sampled the entire space. Checking convergence diagnostics such as the effective sample sizes (n_eff) and Rhat values evaluate how well the sampler is doing at sampling the posterior distribution of the given model. After doing these checks, we will then assess the model fit by examining some posterior predictive check (PPC) plots and compare the models using leave-one-out cross-validation (LOO-CV). This will help us understand if this statistical model is appropriate for the data or better than other models.
+
+\newpage
+
+# Results
+
+In this section, we will discuss the results of the following models:
+
+- Model 1: Hierarchical Model with all Covariates (including Neighbourhoods)
+- Model 2: Hierarchical Model with all Covariates (including Districts)
+- Model 3: Hierarchical Model with Selected Covariates (including Districts)
+- Model 4: Linear Model with all Covariates (including Districts)
+
+
+## Model 1 - Neighbourhoods and all Covariates
+
+To begin our analysis, we fit a hierarchical fixed effects model modeling log price, using all of the available covariates, including neighbourhoods. Before fitting the model, numeric variables were mean-centered, and categorical variables were encoded as dummy variables. After running this first model, a warning was received that indicated that the Bulk Effective Samples Size (ESS) was too low, which indicated posterior means and medians may be unreliable. Checking the summary, the Rhat values seemed to be $\approx 1$, with 1.02 as the highest. Because of this warning, we then considered grouping the neighbourhoods into larger geographical areas, and perhaps limiting the covariates to those which appeared to be of interest in the exploratory data analysis. 
+
+```{r, include=FALSE}
+# lets get the data into the correct format for stan
+
+# make room type a factor
+print(levels(as.factor(airbnb_final$room_type)))
+airbnb_data <- airbnb_final %>% 
+  select(-host_id, -host_since, -price) %>%
+  mutate(room_type = as.numeric(as.factor(room_type)))  
+
+# mean center numeric variables
+airbnb_data2 <-
+  airbnb_data %>% mutate(
+    host_listings_count = scale(host_listings_count, center=TRUE, scale=FALSE),
+    bathrooms = scale(bathrooms, center=TRUE, scale=FALSE),
+    accommodates = scale(accommodates, center=TRUE, scale=FALSE),
+    bedrooms = scale(bedrooms, center=TRUE, scale=FALSE),
+    number_of_reviews = scale(number_of_reviews, center=TRUE, scale=FALSE),
+    review_scores_rating = scale(review_scores_rating, center=TRUE, scale=FALSE),
+    review_scores_accuracy = scale(review_scores_accuracy, center=TRUE, scale=FALSE),
+    review_scores_cleanliness = scale(review_scores_cleanliness, center=TRUE, scale=FALSE),
+    review_scores_checkin = scale(review_scores_checkin, center=TRUE, scale=FALSE),
+    review_scores_communication = scale(review_scores_communication, center=TRUE, scale=FALSE),
+    review_scores_location = scale(review_scores_location, center=TRUE, scale=FALSE),
+    review_scores_value = scale(review_scores_value, center=TRUE, scale=FALSE)
+  ) 
+
+```
+
+```{r}
+set.seed(8)
+# create dummy vars for categorical vars
+no_district <- airbnb_data2 %>% select(-district)
+mod1_data <- as.data.frame(model.matrix( ~ ., data = no_district))
+
+# select sample
+sample <- mod1_data %>% sample_n(2000)
+xmatrix <- as.matrix(sample %>% select(-log_price, -room_type, -`(Intercept)`))
+
+# put into stan data
+stan_data <- list(N = nrow(xmatrix),
+                  J = max(mod1_data$room_type),
+                  K = ncol(xmatrix),
+                  room_type = sample$room_type,
+                  X = xmatrix,
+                  y = sample$log_price)
+```
+
+```{r, eval=FALSE}
+model1 <- stan(data = stan_data, 
+               file = here("Project/airbnb_model.stan"),
+               iter = 2000,
+               seed = 8)
+```
+
+```{r, eval=FALSE}
+# save model with everything
+saveRDS(model1, "fit1.rds")
+```
+
+```{r, include=FALSE}
+# load in the model
+model1 <- readRDS("fit1.rds")
+max(summary(model1)$summary[,c("Rhat")])
+```
+
+```{r, include= FALSE}
+summary(model1)$summary[c(paste0("alpha[", 1:4, "]"), paste0("beta[", 1:6, "]"),
+                          paste0("beta[", 146:157, "]"), "mu", "sigma_a", "sigma_y"),
+                        c("mean", "se_mean", "n_eff", "Rhat")]
+```
+
+```{r, include=FALSE}
+# traceplots - alphas
+pars = c(paste0("alpha[", 1:4, "]"))
+traceplot(model1, pars=pars)
+
+stan_dens(model1, separate_chains=TRUE, pars=pars)
+pairs(model1, pars=pars)
+```
+
+```{r,include=FALSE}
+pars = c("mu", "sigma_a", "sigma_y")
+#pars = c(paste0("beta[", 1:6, "]"),paste0("beta[", 146:157, "]"))
+traceplot(model1, pars=pars)
+pairs(model1, pars=pars)
+```
+
+
+## Model 2 - Districts and all Covariates
+
+For the second model, neighbourhoods were grouped into one of the six districts in Toronto, namely, East York, Etobicoke, North York, Old City of Toronto, Scarborough, and York. A visual representation of these districts is displayed in the figure below.
+
+```{r, crop=TRUE}
+# get districts
+geom_plot_dist <- merge(districts, geom, by.y='hood_id', by.x='hood_id')
+dist_plot <- geom_plot_dist %>% dplyr::select(district, geometry)
+
+# plot
+ggplot(data = dist_plot) + 
+  geom_sf(aes(geometry=geometry, fill=district)) + 
+  labs(title="Districts of Toronto") +
+  theme_bw() +
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+```
+
+\newpage
+
+After performing this grouping, the second model was fit with districts instead of neighbourhoods, again hierarchically modeling log price with fixed effects using a room type structure. In this model, all covariates have been included, similar to Model 1. Looking at the Rhat values for this model, the largest Rhat was 1.004751, with the rest of them $\approx 1$, indicating good mixing of the chains. Next, we can look at the traceplot and pairs plots for the alphas. 
+
+```{r}
+set.seed(8)
+# create dummy vars for categorical vars
+district <- airbnb_data2 %>% select(-neighbourhood_cleansed, -hood_id)
+mod2_data <- as.data.frame(model.matrix( ~ ., data = district))
+
+# select sample
+sample2 <- mod2_data %>% sample_n(2000)
+xmatrix2 <- as.matrix(sample2 %>% select(-log_price, -room_type, -`(Intercept)`))
+stan_data2 <- list(N = nrow(xmatrix2),
+                  J = max(mod2_data$room_type),
+                  K = ncol(xmatrix2),
+                  room_type = sample2$room_type,
+                  X = xmatrix2,
+                  y = sample2$log_price)
+```
+
+```{r, eval=FALSE}
+model2 <- stan(data = stan_data2, 
+               file = here("Project/airbnb_model.stan"),
+               iter = 2000,
+               seed = 8)
+```
+
+```{r, eval=FALSE}
+# save model with everything
+saveRDS(model2, "fit2.rds")
+```
+
+
+```{r, include=FALSE}
+# load in the model
+model2 <- readRDS("fit2.rds")
+
+# look at max rhat val
+max(summary(model2)$summary[,c("Rhat")])
+```
+
+```{r, include=FALSE}
+summary(model2)$summary[c(paste0("alpha[", 1:4, "]"), 
+                          paste0("beta[", 1:18, "]"), "mu", "sigma_a", "sigma_y"),
+                        c("mean", "se_mean", "n_eff", "Rhat")]
+```
+
+```{r}
+# traceplots - alphas
+pars = c(paste0("alpha[", 1:4, "]"))
+traceplot(model2, pars=pars)
+```
+
+
+```{r}
+# pairs plot - alphas
+#stan_dens(model2, separate_chains=TRUE, pars=pars)
+pairs(model2, pars=pars)
+```
+
+The traceplot indicated that the chains mixed well. Looking at the pairs plot, we see some ellipse shapes which raises some concern as this can indicate that we are not sampling the entire space. After checking all of convergence diagnostics, we can try and assess model fit. 
+
+\newpage
+
+Next, we can look at the overall distributions of the replicated datasets versus the data. The following figure contains a plot of the distribution of our data (y) against 100 different datasets drawn from the posterior predictive distribution on the top. We see that the observed and the predicted log prices seem to follow the same normal distribution which is good.
+
+We can also look at some test statistics that are of interest. In the bottom panel, we see the distribution of the median (log) prices across the replicated data sets in comparison to the median in the data. We see that for entire homes/apartments, the predicted median log price is too high. It is slightly less high for private and shared rooms, and looks to be about average for the hotel rooms.
+
+```{r}
+set.seed(1856)
+y <- sample2$log_price
+yrep2 <- extract(model2)[["log_price_rep"]]
+samp100 <- sample(nrow(yrep2), 100)
+ppc_dens <- ppc_dens_overlay(y, yrep2[samp100, ])  + ggtitle("Distribution of Observed vs. Predicted Log Prices")
+sample2 <- sample2 %>% mutate(room_names = case_when(room_type == 1 ~ "Entire Home/Apartment", 
+                                                     room_type == 2 ~ "Hotel Room",
+                                                     room_type == 3 ~ "Private Room",
+                                                     room_type == 4 ~ "Shared Room"))
+# test stats - median
+ppc_stat <- ppc_stat_grouped(sample2$log_price, yrep2, group = sample2$room_names, stat = 'median') + ggtitle("Median by Room Type - Model 2")
+
+grid.arrange(ppc_dens,ppc_stat, ncol=1, nrow=2)
+```
+
+\newpage
+
+Finally, we can take a look at the mean room type alphas along with their 95% credible intervals as seen below. Note that to save space, the beta plot has been omitted, but the results will be discussed. 
+
+We see that unsurprisingly, entire homes/apartments have the largest intercept, followed by private rooms. We see that shared rooms and hotels have a much wider credible interval, indicating more uncertainty in those lower prices. 
+
+Looking at the beta coefficients, we see that the covariate with the largest coefficient is review scores location. Out of all of the covariates, the ones that do not contain include zero in their 95% CI are the following: review scores for value, overall rating, location, and communication, host response time within an hour, district of Old City of Toronto, and size variables like accommodates and number of beds/bathrooms. 
+
+
+```{r}
+# extract results from summary
+mod2_summary <- as.data.frame(summary(model2,probs = c(0.025, 0.975))$summary)
+colnames(mod2_summary) <- c("mean", "se_mean", "sd", "ci_lower", "ci_upper", "n_eff", "rhat")
+
+mod2_summary$row_name <- rownames(mod2_summary)
+
+# keep alphas
+mod2_plot <- mod2_summary %>%
+  filter(str_detect(row_name, 'alpha')) 
+
+# add room_type name
+mod2_plot <- mod2_plot %>% mutate(room_type = c("Entire Home/Apartment", "Hotel Room", "Private Room", "Shared Room"))
+
+# plot results
+ggplot(data = mod2_plot, aes(x = mean, y = room_type)) + 
+  geom_point() +
+  geom_line() + 
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper), size=0.25) + 
+  theme_minimal() +
+  labs(x = "Alpha", y = "Room Type", 
+       title = "Room Type Alphas (Intercepts)", subtitle="With 95% CIs")
+```
+
+
+```{r, eval=FALSE}
+cols2 <- colnames(sample2 %>% select(-log_price, -room_type, -`(Intercept)`))
+
+# keep betas
+mod2_plot_beta <- mod2_summary %>%
+  filter(str_detect(row_name, 'beta')) 
+
+# add room_type name
+mod2_plot_beta <- mod2_plot_beta %>% mutate(variable = cols2)
+
+# plot results
+ggplot(data = mod2_plot_beta, aes(x = mean, y = variable)) + 
+  geom_point() +
+  geom_line() + 
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper), size=0.25) + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30)) + 
+  labs(y = "Variable", x = "Beta", 
+       title = "Beta Coefficients", subtitle="With 95% CIs")
+
+```
+
+\newpage
+
+## Model 3 - Districts with Selected Covariates
+
+Another model we can investigate is a similar model to Model 2, but with less covariates. In this model, we will try to reduce the covariates to contain only those that were identified in our exploratory analysis as important, namely, district, number of bedrooms, number of bathroom, how many people it accommodates, and some review score variables (overall, accuracy, cleanliness, and location). No variables pertaining to the host will be included as they did not appear to have a relationship with our variable of interest, log price. After running the model, the Rhat values looked good (maximum value of 1.002776), and the chains looked like they mixed well in the traceplot. Looking at the pairs plot, some of the ellipse-like shapes have improved, however, it is still present between alpha one and three. The PPC plots for the model looked similar to the ones from the previous model, with the predicted median log price too high for entire homes/apartments. 
+
+```{r}
+set.seed(8)
+
+# keep only selected vars from EDA
+mod3 <- airbnb_data2 %>% select(bedrooms, bathrooms, room_type, district, log_price, accommodates, review_scores_rating, review_scores_accuracy, review_scores_cleanliness, review_scores_location)
+
+# create dummy vars for categorical vars
+mod3_data <- as.data.frame(model.matrix( ~ ., data = mod3))
+
+# select sample
+sample3 <- mod3_data %>% sample_n(2000)
+cols <- colnames(sample3 %>% select(-log_price, -room_type, -`(Intercept)`))
+xmatrix3 <- as.matrix(sample3 %>% select(-log_price, -room_type, -`(Intercept)`))
+stan_data3 <- list(N = nrow(xmatrix3),
+                  J = max(mod3_data$room_type),
+                  K = ncol(xmatrix3),
+                  room_type = sample3$room_type,
+                  X = xmatrix3,
+                  y = sample3$log_price)
+```
+
+```{r, eval=FALSE}
+model3 <- stan(data = stan_data3, 
+               file = here("Project/airbnb_model.stan"),
+               iter = 2000,
+               seed = 8)
+```
+
+```{r, eval=FALSE}
+# save model with everything
+saveRDS(model3, "fit3.rds")
+```
+
+
+```{r, include=FALSE}
+# load in the model
+model3 <- readRDS("fit3.rds")
+max(summary(model3)$summary[,c("Rhat")])
+```
+
+```{r, include=FALSE}
+summary(model3)$summary[c(paste0("alpha[", 1:4, "]"), paste0("beta[", 1:2, "]"),
+                          paste0("beta[", 8:12, "]"), "mu", "sigma_a", "sigma_y"),
+                        c("mean", "se_mean", "n_eff", "Rhat")]
+```
+
+```{r, include=FALSE}
+# traceplots - alphas
+pars = c(paste0("alpha[", 1:4, "]"))
+traceplot(model3, pars=pars)
+
+stan_dens(model3, separate_chains=TRUE, pars=pars)
+pairs(model3, pars=pars)
+```
+
+```{r, include=FALSE}
+set.seed(1856)
+y3 <- sample3$log_price
+yrep3 <- extract(model3)[["log_price_rep"]]
+samp100_3 <- sample(nrow(yrep3), 100)
+
+ppc_dens_3 <- ppc_dens_overlay(y3, yrep3[samp100_3, ])  + ggtitle("Distribution of Observed vs. Predicted Log Prices")
+sample3 <- sample3 %>% mutate(room_names = case_when(room_type == 1 ~ "Entire Home/Apartment", 
+                                                     room_type == 2 ~ "Hotel Room",
+                                                     room_type == 3 ~ "Private Room",
+                                                     room_type == 4 ~ "Shared Room"))
+# test stats - median
+ppc_stat_3 <- ppc_stat_grouped(sample3$log_price, yrep3, group = sample3$room_names, stat = 'median') + ggtitle("Median by Room Type - Model 3")
+
+grid.arrange(ppc_dens_3,ppc_stat_3, ncol=1, nrow=2)
+```
+
+
+
+As we have fewer covariates in this model, we can further examine the mean beta coefficients with their respective 95% credible intervals. We see that the covariates with the highest beta coefficients are the number of bathrooms, the district of Old City of Toronto, and the location review score. The covariates with the smallest beta coefficients are the districts of York and Scarborough. This is unsurprising as Old City of Toronto contains the downtown core, whereas York and Scarborough are farther in the suburbs. Looking at the 95% CIs, they are most wide for the district variables, and most narrow for the listing size variables like accomodates and number of beds/bathrooms. We see that only the covariates accommodates, number of bedrooms and bathrooms, district of Old City of Toronto, and location are significant in this model. 
+
+
+```{r}
+# extract results from summary
+mod3_summary <- as.data.frame(summary(model3,probs = c(0.025, 0.975))$summary)
+colnames(mod3_summary) <- c("mean", "se_mean", "sd", "ci_lower", "ci_upper", "n_eff", "rhat")
+
+mod3_summary$row_name <- rownames(mod3_summary)
+
+# keep betas
+mod3_plot <- mod3_summary %>%
+  filter(str_detect(row_name, 'beta')) 
+
+# add room_type name
+mod3_plot <- mod3_plot %>% mutate(variable = cols)
+
+# plot results
+ggplot(data = mod3_plot, aes(x = mean, y = variable)) + 
+  geom_point() +
+  geom_line() + 
+  geom_linerange(aes(xmin = ci_lower, xmax = ci_upper), size=0.25) + 
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30)) + 
+  labs(y = "Variable", x = "Beta", 
+       title = "Beta Coefficients", subtitle="With 95% CIs")
+```
+
+
+## Model 4 - Baseline Model (Linear Fit, all Covariates)
+
+Finally, as a baseline model, we fit a simple linear model in STAN using all the covariates to try and model log price. Checking the model diagnostics, the chains appeared to have mixed well and all Rhat values were $\approx 1$. We can now proceed to compare the models. 
+```{r, eval=FALSE}
+model4 <- stan(data = stan_data2, 
+               file = here("Project/airbnb_linear.stan"),
+               iter = 2000,
+               seed = 8)
+```
+
+
+```{r, eval=FALSE}
+# save model with everything
+saveRDS(model4, "fit4.rds")
+```
+
+
+```{r}
+# load in the model
+model4 <- readRDS("fit4.rds")
+#max(summary(model4)$summary[,c("Rhat")])
+```
+
+```{r, include=FALSE}
+traceplot(model4, pars="beta")
+```
+
+```{r, include=FALSE}
+summary(model4)$summary
+```
+
+## Compare Models
+
+In order to compare the models, we will be examining the LOO ELPD. When comparing two fitted models, we can estimate the difference in their expected predictive accuracy by the difference in LOO ELPD. The first step of this is to get the point-wise log likelihood estimates from each model and then get estimates for the ELPD. For this analysis, we will not include Model 1 in the comparisons. 
+
+```{r warning=FALSE}
+loglik1 <- as.matrix(model1, pars="log_lik")
+loglik2 <- as.matrix(model2, pars="log_lik")
+loglik3 <- as.matrix(model3, pars="log_lik")
+loglik4 <- as.matrix(model4, pars="log_lik")
+```
+
+```{r warning=FALSE}
+loo1 <- loo(loglik1, save_psis=TRUE)
+loo2 <- loo(loglik2, save_psis=TRUE)
+loo3 <- loo(loglik3, save_psis=TRUE)
+loo4 <- loo(loglik3, save_psis=TRUE)
+```
+### Model 2 vs. Model 3
+```{r}
+kable(loo_compare(loo2,loo3))
+```
+Here we see that Model 2 had the higher ELPD, and thus is a better model fit.
+
+### Model 2 vs. Model 4
+```{r}
+kable(loo_compare(loo2,loo4))
+```
+When looking at Model 2 versus Model 4, again, Model 2 had the higher ELPD, and thus is the better model. 
+
+### Model 3 vs. Model 4
+
+```{r}
+kable(loo_compare(loo3,loo4))
+```
+Interestingly, between Model 3 and Model 4, there is no difference. Therefore, we are indifferent between the two models. 
+
+# Discussion
+Intuitively, we expected to see that the neighborhood the AirBnb is in, the type of room, and the variables regarding the listing itself would be the most influential on price. For example, an entire house downtown or near the water with 3+ beds will be more expensive than a shared room farther from the core. The results from the various models examined in this analysis agreed well with this hypothesis. 
+
+We first fit a hierarchical fixed effects model modeling log price, using all of the available covariates, including neighbourhoods. Including neighbourhoods in the model resulted in a model which had a low bulk effective sample size. To combat this, neighbourhoods were grouped into districts and the model was re-run (Model 2). The second model had good diagnostics, and the significant coefficients were review scores for value, overall rating, location, and communication, host response time within an hour, district of Old City of Toronto, and size variables like accommodates and number of beds/bathrooms. Motivated by the EDA, a third model was fit using a smaller subset of variables. This model also had good diagnostics, and the significant coefficients were accommodates, number of bedrooms and bathrooms, district of Old City of Toronto, and review scores for location. For both models, the intercept for entire house/apartment was highest, with hotel room lowest. Finally, a fourth model was fit using a simple linear fit for comparison purposes. After comparing the models using LOO ELPD, it was found that the optimal model was Model 2. 
+
+## Future Work 
+As with any analysis, it is important to consider how the work could be extended upon. For future work, and interested individual could try a second model specification - a hierarchical model with mixed effects to allow for varying slopes. In this analysis, we focused on a hierarchical model with fixed effects only. It may be interesting to consider whether an additional bedroom/bathroom is worth more in different room types, for example, in a hotel room versus a private room. After constructing this model we then could compare the models using LOO-CV as we did in this analysis. 
+
+# References
+Airbnb. "What Is Airbnb and How Does It Work?", https://www.airbnb.ca/help/article/2503/what-is-airbnb-and-how-does-it-work?" Accessed April 15, 2022.
+
+City of Toronto, Open Data Portal. 2022. Neighbourhoods. https://open.toronto.ca/dataset/neighbourhoods/
+
+Government of Canada, Statistics Canada (February 9, 2022). "Census Profile, 2021 Census of Population". www12.statcan.gc.ca. Retrieved April 02, 2022.
+
